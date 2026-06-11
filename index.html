@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>眼動追蹤 - 四角感應區域（含 micro:bit 通訊）</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: system-ui, sans-serif;
+    }
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    video, canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    /* 鏡像（自拍慣例） */
+    video, canvas {
+      transform: scaleX(-1);
+    }
+
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      background: rgba(0,0,0,0.6);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      z-index: 10;
+    }
+
+    #status {
+      position: absolute;
+      top: 50px;
+      left: 10px;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: bold;
+      z-index: 10;
+      min-width: 220px;
+      text-align: center;
+    }
+    .success { background: #e6ffed; color: #28A745; }
+    .error   { background: #ffe6e6; color: #DC3545; }
+    .warning { background: #fff3cd; color: #856404; }
+
+    #connectBluetooth, #connectUSB {
+      position: absolute;
+      top: 100px;
+      padding: 10px 18px;
+      font-size: 15px;
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      color: white;
+      z-index: 10;
+    }
+    #connectBluetooth { left: 10px; background: #0069d9; }
+    #connectBluetooth:hover { background: #0056b3; }
+    #connectUSB      { left: 180px; background: #218838; }
+    #connectUSB:hover      { background: #1e7e34; }
+
+    #calibration-btn {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 20px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      z-index: 10;
+    }
+
+    #calibration-point {
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      background: red;
+      border-radius: 50%;
+      display: none;
+      z-index: 5;
+      transform: translate(-50%, -50%);
+    }
+
+    /* 四角感應區域 */
+    .gaze-zone {
+      position: absolute;
+      width: 41.67vmin;
+      height: 41.67vmin;
+      background: rgba(255, 255, 255, 0.25);
+      border: 1px solid transparent;
+      border-radius: 8px;
+      transition: border 0.3s ease, box-shadow 0.3s ease;
+      pointer-events: none;
+      z-index: 8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 7vmin;
+      font-weight: bold;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+      overflow: hidden;
+      --progress: 0%;
+    }
+
+    .gaze-zone.active {
+      border: 3px solid #ffffff;
+      box-shadow: 0 0 20px rgba(255, 255, 255, 0.7);
+    }
+
+    .gaze-zone::before {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: var(--progress);
+      background: rgba(255, 255, 255, 0.45);
+      transition: height 0.1s linear;
+      z-index: -1;
+    }
+
+    #zone-door   { top: 0;    left: 0;    }
+    #zone-window { top: 0;    right: 0;   }
+    #zone-light  { bottom: 0; left: 0;    }
+    #zone-fan    { bottom: 0; right: 0;   }
+
+    #result-display {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 20vmin;
+      font-weight: bold;
+      color: #ffeb3b;
+      text-shadow: 0 0 30px #000, 4px 4px 0 #000;
+      pointer-events: none;
+      z-index: 15;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+
+    #result-display.show {
+      opacity: 1;
+    }
+  </style>
+
+  <!-- MediaPipe CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="container">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <!-- 四個角落感應區域 -->
+    <div class="gaze-zone" id="zone-door">DOOR</div>
+    <div class="gaze-zone" id="zone-window">WINDOW</div>
+    <div class="gaze-zone" id="zone-light">LIGHT</div>
+    <div class="gaze-zone" id="zone-fan">FAN</div>
+
+    <div id="info">正在開啟攝影機… 請允許權限</div>
+    <div id="status"></div>
+
+    <button id="connectBluetooth">連線 micro:bit (藍牙)</button>
+    <button id="connectUSB">連線 micro:bit (USB)</button>
+
+    <button id="calibration-btn">重新校正</button>
+    <div id="calibration-point"></div>
+
+    <div id="result-display"></div>
+  </div>
+
+  <script>
+    // ────────────────────────────────────────────────
+    //          micro:bit 通訊部分（藍牙 + USB）
+    // ────────────────────────────────────────────────
+    const UART_SERVICE_UUID         = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const UART_TX_CHARACTERISTIC_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+    const UART_RX_CHARACTERISTIC_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    let uBitDevice = null;
+    let rxCharacteristic = null;
+    let serialPort = null;
+
+    const onMicrobitReceive = new EventTarget();
+
+    function setStatus(msg, type = "success") {
+      const el = document.getElementById("status");
+      el.textContent = msg;
+      el.className = type;  // success / error / warning
+    }
+
+    // 藍牙連線
+    async function connectBluetooth() {
+      try {
+        setStatus("正在搜尋 micro:bit...", "warning");
+        uBitDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "BBC micro:bit" }],
+          optionalServices: [UART_SERVICE_UUID]
+        });
+
+        uBitDevice.addEventListener("gattserverdisconnected", onBluetoothDisconnected);
+        const server = await uBitDevice.gatt.connect();
+        const service = await server.getPrimaryService(UART_SERVICE_UUID);
+
+        const txChar = await service.getCharacteristic(UART_TX_CHARACTERISTIC_UUID);
+        await txChar.startNotifications();
+        txChar.addEventListener("characteristicvaluechanged", handleBluetoothData);
+
+        rxCharacteristic = await service.getCharacteristic(UART_RX_CHARACTERISTIC_UUID);
+
+        setStatus("✅ 藍牙已連線 micro:bit", "success");
+      } catch (err) {
+        setStatus("❌ 藍牙連線失敗: " + err.message, "error");
+        console.error(err);
+      }
+    }
+
+    function onBluetoothDisconnected() {
+      setStatus("⚠️ 藍牙已斷線", "error");
+      uBitDevice = null;
+      rxCharacteristic = null;
+    }
+
+    function handleBluetoothData(event) {
+      const value = event.target.value;
+      const text = new TextDecoder().decode(value).trim();
+      if (text) {
+        console.log("micro:bit →", text);
+        onMicrobitReceive.dispatchEvent(new CustomEvent("data", { detail: text }));
+      }
+    }
+
+    // USB 連線
+    async function connectUSB() {
+      try {
+        setStatus("請選擇 micro:bit 的 USB 序列埠...", "warning");
+        serialPort = await navigator.serial.requestPort();
+        await serialPort.open({ baudRate: 9600 });
+
+        setStatus("✅ USB 已連線 micro:bit", "success");
+
+        const reader = serialPort.readable.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let lines = buffer.split("\n");
+          buffer = lines.pop();
+          for (let line of lines) {
+            line = line.trim();
+            if (line) {
+              console.log("micro:bit (USB) →", line);
+              onMicrobitReceive.dispatchEvent(new CustomEvent("data", { detail: line }));
+            }
+          }
+        }
+      } catch (err) {
+        setStatus("❌ USB 連線失敗: " + err.message, "error");
+        console.error(err);
+      }
+    }
+
+    // 發送給 micro:bit（優先 USB → 藍牙）
+    async function sendToMicrobit(message) {
+      const data = message + "\n";
+      const encoder = new TextEncoder();
+
+      try {
+        if (serialPort?.writable) {
+          const writer = serialPort.writable.getWriter();
+          await writer.write(encoder.encode(data));
+          writer.releaseLock();
+          console.log("USB 發送:", message);
+          return;
+        }
+
+        if (rxCharacteristic) {
+          await rxCharacteristic.writeValue(encoder.encode(data));
+          console.log("藍牙 發送:", message);
+          return;
+        }
+
+        setStatus("⚠️ 尚未連線 micro:bit，無法發送", "error");
+      } catch (err) {
+        setStatus("❌ 發送失敗: " + err.message, "error");
+        console.error(err);
+      }
+    }
+
+    // 按鈕綁定
+    document.getElementById("connectBluetooth").addEventListener("click", connectBluetooth);
+    document.getElementById("connectUSB").addEventListener("click", connectUSB);
+
+    // ────────────────────────────────────────────────
+    //               眼動追蹤核心程式碼
+    // ────────────────────────────────────────────────
+    const videoElement = document.getElementById('video');
+    const canvasElement = document.getElementById('canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const infoElement = document.getElementById('info');
+    const calibBtn = document.getElementById('calibration-btn');
+    const calibPoint = document.getElementById('calibration-point');
+
+    // 感應區域
+    const zones = {
+      door   : document.getElementById('zone-door'),
+      window : document.getElementById('zone-window'),
+      light  : document.getElementById('zone-light'),
+      fan    : document.getElementById('zone-fan')
+    };
+
+    const resultDisplay = document.getElementById('result-display');
+
+    let currentTarget = null;
+    let gazeStartTime = null;
+    const HOLD_DURATION = 1500; // 1.5秒
+
+    // 鏡像映射：交換左右
+    const mirrorMap = {
+      door: 'window',
+      window: 'door',
+      light: 'fan',
+      fan: 'light'
+    };
+
+    // 判斷是否在矩形區域內
+    function isGazeInZone(screenX, screenY, zoneElem) {
+      const rect = zoneElem.getBoundingClientRect();
+      return (
+        screenX >= rect.left &&
+        screenX <= rect.right &&
+        screenY >= rect.top &&
+        screenY <= rect.bottom
+      );
+    }
+
+    function checkGazeInAnyZone(screenX, screenY) {
+      for (const [name, elem] of Object.entries(zones)) {
+        if (isGazeInZone(screenX, screenY, elem)) {
+          return name;
+        }
+      }
+      return null;
+    }
+
+    function showResult(text) {
+      resultDisplay.textContent = text.toUpperCase();
+      resultDisplay.classList.add('show');
+
+      // 關鍵：成功觸發時 → 傳送名字給 micro:bit
+      sendToMicrobit(text.toUpperCase());
+
+      setTimeout(() => {
+        resultDisplay.classList.remove('show');
+      }, 2200);
+    }
+
+    // ==================== 輔助函式：3D 向量運算 ====================
+    function vec3Subtract(a, b) {
+      return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+    }
+
+    function vec3Add(a, b) {
+      return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+    }
+
+    function vec3Scale(v, s) {
+      return { x: v.x * s, y: v.y * s, z: v.z * s };
+    }
+
+    function vec3Dot(a, b) {
+      return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
+
+    function vec3Cross(a, b) {
+      return {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x
+      };
+    }
+
+    function vec3Magnitude(v) {
+      return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    }
+
+    function vec3Normalize(v) {
+      const mag = vec3Magnitude(v);
+      return mag > 0 ? vec3Scale(v, 1 / mag) : v;
+    }
+
+    function closestPointBetweenRays(ray1Origin, ray1Dir, ray2Origin, ray2Dir) {
+      const d1 = vec3Normalize(ray1Dir);
+      const d2 = vec3Normalize(ray2Dir);
+      const diff = vec3Subtract(ray2Origin, ray1Origin);
+
+      const crossD1D2 = vec3Cross(d1, d2);
+      const denom = vec3Dot(crossD1D2, crossD1D2);
+
+      if (denom === 0) {
+        return { point: null, distance: vec3Magnitude(vec3Cross(diff, d1)) / vec3Magnitude(d1) };
+      }
+
+      const t = vec3Dot(vec3Cross(diff, d2), crossD1D2) / denom;
+      const s = vec3Dot(vec3Cross(diff, d1), crossD1D2) / denom;
+
+      const p1 = vec3Add(ray1Origin, vec3Scale(d1, t));
+      const p2 = vec3Add(ray2Origin, vec3Scale(d2, s));
+      const midpoint = vec3Scale(vec3Add(p1, p2), 0.5);
+
+      const distance = vec3Magnitude(vec3Subtract(p1, p2));
+      return { point: midpoint, distance };
+    }
+
+    // ==================== 校正系統 ====================
+    let isCalibrating = false;
+    let allCalibrationData = []; // 全局累積所有校正數據
+    let calibrationData = []; // 本次校正臨時數據
+    let calibrationPoints = [
+      {x: 0.1, y: 0.1}, {x: 0.5, y: 0.1}, {x: 0.9, y: 0.1},
+      {x: 0.1, y: 0.3}, {x: 0.5, y: 0.3}, {x: 0.9, y: 0.3},
+      {x: 0.1, y: 0.5}, {x: 0.5, y: 0.5}, {x: 0.9, y: 0.5},
+      {x: 0.1, y: 0.7}, {x: 0.5, y: 0.7}, {x: 0.9, y: 0.7},
+      {x: 0.1, y: 0.9}, {x: 0.5, y: 0.9}, {x: 0.9, y: 0.9}
+    ]; // 15 點
+    let currentCalibIndex = 0;
+    let currentGazeSamples = [];
+    let modelCoeffsX = null;
+    let modelCoeffsY = null;
+
+    // 新增：平均 gaze 點
+    function averageGaze(samples) {
+      if (samples.length === 0) return null;
+      return samples.reduce((acc, p) => ({
+        x: acc.x + p.x / samples.length,
+        y: acc.y + p.y / samples.length,
+        z: acc.z + p.z / samples.length
+      }), {x: 0, y: 0, z: 0});
+    }
+
+    // 二次模型擬合
+    function fitLinearModel(inputs, outputs) {
+      const n = inputs.length;
+      if (n < 7) {
+        alert('累積數據不足（需至少7點），請繼續校正。');
+        console.error('數據點數:', n);
+        return null;
+      }
+      const A = inputs.map(inp => [
+        inp.gazeX, inp.gazeY, inp.gazeZ, 1, 
+        inp.gazeX * inp.gazeX, inp.gazeY * inp.gazeY, inp.gazeX * inp.gazeY
+      ]);
+      const y = outputs;
+
+      const At = transpose(A);
+      const AtA = multiply(At, A);
+      const y_column = y.map(val => [val]);
+      const AtY = multiply(At, y_column);
+
+      return gaussianElimination(AtA, AtY.flat());
+    }
+
+    // 使用模型預測
+    function predictScreenPos(gaze, coeffsX, coeffsY) {
+      const gx2 = gaze.x * gaze.x;
+      const gy2 = gaze.y * gaze.y;
+      const gxy = gaze.x * gaze.y;
+      let predX = coeffsX[0] * gaze.x + coeffsX[1] * gaze.y + coeffsX[2] * gaze.z + coeffsX[3] +
+                  coeffsX[4] * gx2 + coeffsX[5] * gy2 + coeffsX[6] * gxy;
+      let predY = coeffsY[0] * gaze.x + coeffsY[1] * gaze.y + coeffsY[2] * gaze.z + coeffsY[3] +
+                  coeffsY[4] * gx2 + coeffsY[5] * gy2 + coeffsY[6] * gxy;
+      predX = Math.max(0, Math.min(1, predX));
+      predY = Math.max(0, Math.min(1, predY));
+      return { x: predX, y: predY };
+    }
+
+    // 矩陣函式
+    function transpose(matrix) {
+      return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]));
+    }
+
+    function multiply(a, b) {
+      const result = [];
+      for (let i = 0; i < a.length; i++) {
+        result[i] = [];
+        for (let j = 0; j < b[0].length; j++) {
+          let sum = 0;
+          for (let k = 0; k < a[0].length; k++) {
+            sum += a[i][k] * b[k][j];
+          }
+          result[i][j] = sum;
+        }
+      }
+      return result;
+    }
+
+    function gaussianElimination(A, b) {
+      const n = A.length;
+      const aug = A.map((row, i) => [...row, b[i]]);
+
+      for (let p = 0; p < n; p++) {
+        let max = p;
+        for (let i = p + 1; i < n; i++) {
+          if (Math.abs(aug[i][p]) > Math.abs(aug[max][p])) max = i;
+        }
+        [aug[p], aug[max]] = [aug[max], aug[p]];
+
+        for (let i = p + 1; i < n; i++) {
+          const alpha = aug[i][p] / aug[p][p];
+          for (let j = p; j <= n; j++) {
+            aug[i][j] -= alpha * aug[p][j];
+          }
+        }
+      }
+
+      const x = new Array(n).fill(0);
+      for (let i = n - 1; i >= 0; i--) {
+        let sum = 0;
+        for (let j = i + 1; j < n; j++) {
+          sum += aug[i][j] * x[j];
+        }
+        x[i] = (aug[i][n] - sum) / aug[i][i];
+      }
+      return x;
+    }
+
+    // 顯示校正點
+    function showCalibPoint(index) {
+      const pt = calibrationPoints[index];
+      calibPoint.style.left = `${pt.x * 100}%`;
+      calibPoint.style.top = `${pt.y * 100}%`;
+      calibPoint.style.display = 'block';
+      infoElement.textContent = `盯住紅點 (${index + 1}/${calibrationPoints.length})，收集數據中...`;
+      currentGazeSamples = [];
+      const collectInterval = setInterval(() => {
+        if (currentIntersection && currentIntersection.point) {
+          currentGazeSamples.push(currentIntersection.point);
+        }
+      }, 100);
+      setTimeout(() => {
+        clearInterval(collectInterval);
+        collectGazeSample();
+      }, 2000);
+    }
+
+    // 收集樣本
+    function collectGazeSample() {
+      const avgGaze = averageGaze(currentGazeSamples);
+      if (avgGaze) {
+        const pt = calibrationPoints[currentCalibIndex];
+        calibrationData.push({
+          screenX: pt.x,
+          screenY: pt.y,
+          gazeX: avgGaze.x,
+          gazeY: avgGaze.y,
+          gazeZ: avgGaze.z
+        });
+        console.log(`點 ${currentCalibIndex + 1} 收集:`, avgGaze);
+      } else {
+        console.warn(`點 ${currentCalibIndex + 1} 無有效數據`);
+      }
+
+      currentCalibIndex++;
+      if (currentCalibIndex < calibrationPoints.length) {
+        showCalibPoint(currentCalibIndex);
+      } else {
+        endCalibration();
+      }
+    }
+
+    // 結束校正，追加數據並擬合
+    function endCalibration() {
+      isCalibrating = false;
+      calibPoint.style.display = 'none';
+      calibBtn.style.display = 'block';
+
+      // 追加本次數據到全局
+      allCalibrationData = allCalibrationData.concat(calibrationData);
+      console.log('累積數據點數:', allCalibrationData.length);
+
+      const inputs = allCalibrationData.map(d => ({gazeX: d.gazeX, gazeY: d.gazeY, gazeZ: d.gazeZ}));
+      const outputsX = allCalibrationData.map(d => d.screenX);
+      const outputsY = allCalibrationData.map(d => d.screenY);
+
+      modelCoeffsX = fitLinearModel(inputs, outputsX);
+      modelCoeffsY = fitLinearModel(inputs, outputsY);
+
+      if (modelCoeffsX && modelCoeffsY) {
+        infoElement.textContent = `校正完成！累積 ${allCalibrationData.length} 點，gaze 點用綠色顯示。`;
+        console.log('校正係數 X:', modelCoeffsX);
+        console.log('校正係數 Y:', modelCoeffsY);
+      } else {
+        infoElement.textContent = '校正失敗（數據不足），請重試。';
+      }
+
+      // 重置本次臨時數據
+      calibrationData = [];
+    }
+
+    calibBtn.addEventListener('click', () => {
+      isCalibrating = true;
+      currentCalibIndex = 0;
+      calibrationData = []; // 只重置本次
+      calibBtn.style.display = 'none';
+      showCalibPoint(0);
+    });
+
+    // (選做) console 重置累積數據：window.resetCalibration()
+    window.resetCalibration = () => {
+      allCalibrationData = [];
+      modelCoeffsX = null;
+      modelCoeffsY = null;
+      console.log('已重置累積數據');
+    };
+
+    // ==================== MediaPipe FaceMesh 初始化 ====================
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    let currentIntersection = null;
+    let smoothedPred = null;
+    const smoothingFactor = 0.7;
+
+    // ==================== 主要處理函式 ====================
+    faceMesh.onResults((results) => {
+      canvasElement.width = videoElement.videoWidth;
+      canvasElement.height = videoElement.videoHeight;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      if (results.multiFaceLandmarks) {
+        for (const landmarks of results.multiFaceLandmarks) {
+          // 畫眼部
+          drawConnectors(canvasCtx, landmarks, FACEMESH_LEFT_EYE, {color: '#00ffff', lineWidth: 3});
+          drawConnectors(canvasCtx, landmarks, FACEMESH_RIGHT_EYE, {color: '#00ffff', lineWidth: 3});
+          drawConnectors(canvasCtx, landmarks, FACEMESH_LEFT_EYEBROW, {color: '#ff8800', lineWidth: 2});
+          drawConnectors(canvasCtx, landmarks, FACEMESH_RIGHT_EYEBROW, {color: '#ff8800', lineWidth: 2});
+          drawLandmarks(canvasCtx, [landmarks[468]], {color: '#ff00ff', fillColor: '#ff00ff88', radius: 6});
+          drawLandmarks(canvasCtx, [landmarks[473]], {color: '#ff00ff', fillColor: '#ff00ff88', radius: 6});
+
+          // Gaze 計算
+          const eyeballRadius = 0.024;
+          const leftEyePoints = [landmarks[33], landmarks[133], landmarks[159], landmarks[145]];
+          const leftEyeCenter = leftEyePoints.reduce((acc, p) => ({
+            x: acc.x + p.x / 4, y: acc.y + p.y / 4, z: acc.z + p.z / 4
+          }), {x: 0, y: 0, z: 0});
+          const leftEyeballCenter = vec3Add(leftEyeCenter, {x: 0, y: 0, z: -eyeballRadius});
+
+          const rightEyePoints = [landmarks[263], landmarks[362], landmarks[386], landmarks[374]];
+          const rightEyeCenter = rightEyePoints.reduce((acc, p) => ({
+            x: acc.x + p.x / 4, y: acc.y + p.y / 4, z: acc.z + p.z / 4
+          }), {x: 0, y: 0, z: 0});
+          const rightEyeballCenter = vec3Add(rightEyeCenter, {x: 0, y: 0, z: -eyeballRadius});
+
+          const leftIrisCenter = landmarks[468];
+          const rightIrisCenter = landmarks[473];
+
+          const leftRayOrigin = leftEyeballCenter;
+          const leftRayDir = vec3Subtract(leftIrisCenter, leftEyeballCenter);
+
+          const rightRayOrigin = rightEyeballCenter;
+          const rightRayDir = vec3Subtract(rightIrisCenter, rightEyeballCenter);
+
+          if (vec3Magnitude(leftRayDir) < 0.001 || vec3Magnitude(rightRayDir) < 0.001) {
+            console.warn('Ray direction too small, skipping frame');
+            return;
+          }
+
+          currentIntersection = closestPointBetweenRays(leftRayOrigin, leftRayDir, rightRayOrigin, rightRayDir);
+
+          if (currentIntersection.point && !isCalibrating) {
+            if (modelCoeffsX && modelCoeffsY) {
+              let pred = predictScreenPos(currentIntersection.point, modelCoeffsX, modelCoeffsY);
+              pred.x = 1 - pred.x;
+
+              if (!smoothedPred) {
+                smoothedPred = pred;
+              } else {
+                smoothedPred.x = smoothedPred.x * smoothingFactor + pred.x * (1 - smoothingFactor);
+                smoothedPred.y = smoothedPred.y * smoothingFactor + pred.y * (1 - smoothingFactor);
+              }
+
+              // 內部 canvas 座標
+              const internalX = smoothedPred.x * canvasElement.width;
+              const internalY = smoothedPred.y * canvasElement.height;
+
+              // 縮放至顯示座標 (clientWidth/Height 是 CSS 顯示大小)
+              const displayWidth = canvasElement.clientWidth;
+              const displayHeight = canvasElement.clientHeight;
+              const scaledX = (internalX / canvasElement.width) * displayWidth;
+              const scaledY = (internalY / canvasElement.height) * displayHeight;
+
+              // 畫綠色 gaze 點 (用內部座標畫在 canvas 上)
+              canvasCtx.beginPath();
+              canvasCtx.arc(internalX, internalY, 10, 0, 2 * Math.PI);
+              canvasCtx.fillStyle = '#00ff00';
+              canvasCtx.fill();
+
+              const leftIrisX = landmarks[468].x * canvasElement.width;
+              const leftIrisY = landmarks[468].y * canvasElement.height;
+              const rightIrisX = landmarks[473].x * canvasElement.width;
+              const rightIrisY = landmarks[473].y * canvasElement.height;
+
+              canvasCtx.strokeStyle = '#ffff00';
+              canvasCtx.lineWidth = 2;
+
+              canvasCtx.beginPath();
+              canvasCtx.moveTo(leftIrisX, leftIrisY);
+              canvasCtx.lineTo(internalX, internalY);
+              canvasCtx.stroke();
+
+              canvasCtx.beginPath();
+              canvasCtx.moveTo(rightIrisX, rightIrisY);
+              canvasCtx.lineTo(internalX, internalY);
+              canvasCtx.stroke();
+
+              // 用縮放後座標檢查感應區
+              let detectedZone = checkGazeInAnyZone(scaledX, scaledY);
+              if (detectedZone) {
+                // 鏡像交換左右
+                const target = mirrorMap[detectedZone];
+
+                if (currentTarget === target) {
+                  const elapsed = Date.now() - gazeStartTime;
+                  const progress = (elapsed / HOLD_DURATION) * 100;
+                  zones[target].style.setProperty('--progress', progress + '%'); // 更新映射後的區域樣式
+
+                  if (elapsed >= HOLD_DURATION) {
+                    showResult(target);
+                    currentTarget = null;
+                    gazeStartTime = null;
+                    zones[target].style.setProperty('--progress', '0%');
+                    zones[target].classList.remove('active');
+                  }
+                } else {
+                  // 重置所有區域進度
+                  Object.values(zones).forEach(zone => {
+                    zone.style.setProperty('--progress', '0%');
+                    zone.classList.remove('active');
+                  });
+
+                  currentTarget = target;
+                  gazeStartTime = Date.now();
+                }
+                zones[target].classList.add('active');
+              } else {
+                currentTarget = null;
+                gazeStartTime = null;
+                Object.values(zones).forEach(zone => {
+                  zone.style.setProperty('--progress', '0%');
+                  zone.classList.remove('active');
+                });
+              }
+            } else {
+              const screenZ = 0.5;
+              const gazeDir = vec3Normalize(vec3Add(leftRayDir, rightRayDir));
+              if (gazeDir.z > 0.001) {
+                const t = (screenZ - currentIntersection.point.z) / gazeDir.z;
+                if (t > 0) {
+                  const screenPoint = vec3Add(currentIntersection.point, vec3Scale(gazeDir, t));
+                  const internalX = ((screenPoint.x * 5) + 0.5) * canvasElement.width;
+                  const internalY = ((screenPoint.y * 5) + 0.5) * canvasElement.height;
+                  canvasCtx.beginPath();
+                  canvasCtx.arc(internalX, internalY, 10, 0, 2 * Math.PI);
+                  canvasCtx.fillStyle = 'red';
+                  canvasCtx.fill();
+                }
+              }
+            }
+          } else if (!currentIntersection.point) {
+            console.warn('No intersection point calculated');
+          }
+        }
+      }
+
+      canvasCtx.restore();
+    });
+
+    // ==================== 啟動攝影機 ====================
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await faceMesh.send({image: videoElement});
+      },
+      width: 1920,
+      height: 1080
+    });
+
+    // 頁面載入後立即開啟攝影機
+    window.addEventListener('load', async () => {
+      try {
+        await camera.start();
+        infoElement.textContent = "攝影機已開啟，請看紅點進行校正（建議先校正準確度較好）";
+      } catch (err) {
+        console.error(err);
+        infoElement.textContent = "無法開啟攝影機，請檢查權限並重新整理頁面";
+      }
+    });
+
+  </script>
+</body>
+</html>
